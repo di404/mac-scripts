@@ -1,0 +1,85 @@
+#!/bin/zsh
+# 锁定键盘和触控板以便清洁，连续按 8 下 F 解锁
+# 用法: cleanlock          锁定（10 分钟后自动解锁）
+#       cleanlock 5        锁定，5 分钟后自动解锁
+#
+# 拦截输入需要 macOS 的 CGEventTap，shell 本身做不到，所以下面内嵌了一段 Swift。
+# 第一次运行（或修改本文件后）会自动编译到 ~/.cache/cleanlock，之后直接运行。
+
+bin="$HOME/.cache/cleanlock/cleanlock"
+
+if [[ ! -x "$bin" || "$0" -nt "$bin" ]]; then
+  echo "编译中…"
+  mkdir -p "${bin:h}"
+  swiftc -O -o "$bin" - <<'SWIFT' || exit 1
+import ApplicationServices
+import Foundation
+
+setvbuf(stdout, nil, _IONBF, 0) // 输出不进缓冲区，即使不是在终端里运行也立刻显示
+
+let unlockKeyCode: Int64 = 3      // kVK_ANSI_F
+let unlockPresses = 8
+let pressWindow: TimeInterval = 3 // 两次 F 之间超过这个间隔就重新计数
+
+let maxMinutes = CommandLine.arguments.count > 1 ? (Double(CommandLine.arguments[1]) ?? 10) : 10
+
+let trusted = AXIsProcessTrustedWithOptions(
+    [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+if !trusted {
+    print("需要辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能，给运行本命令的终端 App 打开开关，然后重试。")
+    exit(1)
+}
+
+var count = 0
+var lastPress = Date.distantPast
+var tap: CFMachPort?
+
+func unlock(_ reason: String) {
+    print("🔓 已解锁（\(reason)）")
+    exit(0)
+}
+
+let callback: CGEventTapCallBack = { _, type, event, _ in
+    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+        if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+        return nil
+    }
+    if type == .keyDown && event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+        let key = event.getIntegerValueField(.keyboardEventKeycode)
+        let now = Date()
+        if key == unlockKeyCode && event.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty {
+            count = now.timeIntervalSince(lastPress) <= pressWindow ? count + 1 : 1
+            lastPress = now
+            if count >= unlockPresses { unlock("F × \(unlockPresses)") }
+        } else {
+            count = 0
+        }
+    }
+    return nil // 吞掉所有事件
+}
+
+tap = CGEvent.tapCreate(
+    tap: .cghidEventTap,
+    place: .headInsertEventTap,
+    options: .defaultTap,
+    eventsOfInterest: CGEventMask.max,
+    callback: callback,
+    userInfo: nil)
+
+guard let tap else {
+    print("无法拦截输入事件，请确认终端 App 已获得辅助功能权限。")
+    exit(1)
+}
+
+let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+CGEvent.tapEnable(tap: tap, enable: true)
+
+DispatchQueue.main.asyncAfter(deadline: .now() + maxMinutes * 60) { unlock("超过 \(Int(maxMinutes)) 分钟自动解锁") }
+
+print("🔒 键盘和触控板已锁定。连续按 \(unlockPresses) 下 F 解锁（\(Int(maxMinutes)) 分钟后自动解锁）。")
+CFRunLoopRun()
+SWIFT
+fi
+
+exec "$bin" "$@"

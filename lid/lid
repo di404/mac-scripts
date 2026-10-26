@@ -1,0 +1,28 @@
+#!/bin/zsh
+# 切换 macOS 合盖是否待机（基于 pmset disablesleep）
+# 用法: lid          切换
+#       lid on       合盖不待机（保持运行）
+#       lid off      恢复默认（合盖待机）
+#       lid status   查看当前状态
+
+current() { pmset -g | awk '/SleepDisabled/ {print $2}'; }
+
+show() {
+  if [[ "$(current)" == "1" ]]; then
+    echo "🟢 合盖 → 继续运行（不待机）"
+  else
+    echo "🌙 合盖 → 待机（系统默认）"
+  fi
+}
+
+set_to() {
+  sudo pmset -a disablesleep "$1" && show
+}
+
+case "${1:-toggle}" in
+  on)     set_to 1 ;;
+  off)    set_to 0 ;;
+  status) show ;;
+  toggle) [[ "$(current)" == "1" ]] && set_to 0 || set_to 1 ;;
+  *)      echo "用法: lid [on|off|status]"; exit 1 ;;
+esac
